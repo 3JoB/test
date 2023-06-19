@@ -1,0 +1,23 @@
+{
+    "root": true,
+    "parser": "@typescript-eslint/parser",
+    "parserOptions": {
+        "ecmaVersion": 2017,
+        "sourceType": "module"
+    },
+    "ignorePatterns": ["**/*.js", "**/*.ts"],
+    "plugins": ["@typescript-eslint", "import"],
+    "rules": {
+        "no-restricted-imports": [
+            "error",
+            {
+                "patterns": [
+                    {
+                        "group": ["*"],
+                        "message": "Please use the absolute path for bdsx libraries."
+                    }
+                ]
+            }
+        ]
+    }
+}
