@@ -11,7 +11,7 @@ class Chunk:
         self.length = length
         self.type = chunk_type
         self.data = data
-
+        
 class PNG:
     def __init__(self, input_png):
         with open(input_png, 'rb') as f:
@@ -25,10 +25,9 @@ class PNG:
         self.ihdr_start = self.png_data.index(b'IHDR')
         self.width, self.height = struct.unpack('>II', self.png_data[self.ihdr_start+8:self.ihdr_start+16])
         
-    def embed_file(self, input_file, output_file): 
+    def embed_file(self, input_file, output_file):
         # Find and record IDAT chunk info 
-        idat_start = None
-        idat_end = None
+        idat_start, idat_end = None, None
         idat_data = b''
         for chunk in self.parse_chunks():
             if chunk.type == b'IDAT':
@@ -37,8 +36,10 @@ class PNG:
                 idat_end = chunk.end
                 idat_data += chunk.data
         
+        # Get file data
+        file_data = open(input_file, 'rb').read() 
+        
         # Build new IDAT with file data
-        file_data = open(input_file, 'rb').read()
         file_chunk = b'IDAT' + struct.pack('>I', len(file_data))
         file_chunk += file_data
         file_chunk += struct.pack('>I', zlib.crc32(b'IDAT' + file_data))
@@ -49,7 +50,7 @@ class PNG:
         
         # Save new PNG and check 
         with open(output_file, 'wb') as f:
-            f.write(new_png_data) 
+            f.write(new_png_data)
         self.png_check(output_file)
         
         print(f'File {input_file} embedded into {output_file}')
@@ -63,7 +64,7 @@ class PNG:
             chunk_type = self.png_data[chunk_start+4:chunk_start+8]
             chunk_end = chunk_start + chunk_len + 12
             
-            chunks.append(Chunk(chunk_start, chunk_end, chunk_len, chunk_type, chunk_data))  
+            chunks.append(Chunk(chunk_start, chunk_end, chunk_len, chunk_type, self.png_data[chunk_start+8:chunk_end]))           
             
             if chunk_type == b'IEND':
                 break
@@ -76,16 +77,16 @@ class PNG:
         # Fix CRC 
         prev_chunk = None
         for chunk in self.parse_chunks():   
-            if chunk['start'] < idat_start:
-                png_data = png_data[:chunk['end']] + png_data[idat_end:]
+            if chunk.start < idat_start:
+                png_data = png_data[:chunk.end] + png_data[idat_end:]
                 prev_chunk = chunk
                 continue         
             if prev_chunk:
-                offset = chunk['start'] - prev_chunk['end'] 
-                chunk['start'] -= offset
-                chunk['end'] -= offset
-            crc = zlib.crc32(png_data[chunk['start']:chunk['end']])
-            png_data = png_data[:chunk['end']] + struct.pack('>I', crc) + png_data[chunk['end'] + 4:] 
+                offset = chunk.start - prev_chunk.end 
+                chunk.start -= offset
+                chunk.end -= offset
+            crc = zlib.crc32(png_data[chunk.start:chunk.end])
+            png_data = png_data[:chunk.end] + struct.pack('>I', crc) + png_data[chunk.end + 4:] 
             prev_chunk = chunk
             
         # Fix lengths   
@@ -100,7 +101,7 @@ class PNG:
         check_result = os.popen(pngcheck_cmd).read()
         if 'OK' not in check_result:
             raise ValueError(f'Output PNG check failed. Results: \n{check_result}')
-            
+
 if __name__ == '__main__':
     input_file = sys.argv[1]
     input_png = sys.argv[2]
