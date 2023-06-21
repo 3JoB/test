@@ -63,13 +63,7 @@ class PNG:
             chunk_type = self.png_data[chunk_start+4:chunk_start+8]
             chunk_end = chunk_start + chunk_len + 12
             
-            chunks.append({
-                'start': chunk_start,
-                'end': chunk_end, 
-                'len': chunk_len,
-                'type': chunk_type, 
-                'data': self.png_data[chunk_start+8:chunk_end]
-            })
+            chunks.append(Chunk(chunk_start, chunk_end, chunk_len, chunk_type, chunk_data))  
             
             if chunk_type == b'IEND':
                 break
