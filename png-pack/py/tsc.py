@@ -1,67 +1,116 @@
-import sys 
+import sys
 import struct
 import zlib
 
-def embed_file(input_file, input_png, output_file):
-    # Read input and png file
-    with open(input_file, 'rb') as f:
-        input_data = f.read()
-    with open(input_png, 'rb') as f:
-        png_data = f.read()
+PNG_MAGIC = b'\x89PNG\r\n\x1a\n'
 
-    # Find first IDAT chunk 
-    first_idat = png_data.index(b'IDAT')
+class Chunk:
+    def __init__(self, start, end, length, chunk_type, data):
+        self.start = start
+        self.end = end
+        self.length = length
+        self.type = chunk_type
+        self.data = data
 
-    # Get compression method 
-    compression_method = png_data[first_idat+8]  
-
-    # Find IDAT chunk 
-    start = png_data.index(b'IDAT') 
-
-    # Read IDAT header and length 
-    idat_header = png_data[start:start+8]
-    idat_len = struct.unpack('>I', png_data[start+8:start+12])[0]
-
-    # Get IDAT data
-    idat_data = png_data[start+12:start+12+idat_len]  
-
-    # Decompress according to compression method
-    decompressed_data = None
-    if compression_method == 0:
-        # No compression
-        decompressed_data = idat_data  
-    elif compression_method == 1:
-        # zlib compression
-        try:
-            decompressed_data = zlib.decompress(idat_data)
-        except zlib.error:
-            # Not zlib data, try other method
-            pass   
-
-    # Build new IDAT chunk 
-    new_idat = idat_header  
-    new_idat += idat_data           # PNG image data 
-
-    # Add file data as new IDAT chunk
-    file_chunk = b'IDAT' + struct.pack('>I', len(input_data))   # Add IDAT header 
-    file_chunk += input_data                                    # File data
-
-    # Replace IDAT chunk 
-    png_data = png_data[:start] + new_idat + png_data[start+12+idat_len:] 
-    png_data += file_chunk
-
-    # Save as PNG
-    with open(output_file, 'wb') as f:
-        f.write(png_data)
+class PNG:
+    def __init__(self, input_png):
+        with open(input_png, 'rb') as f:
+            self.png_data = f.read()
+            
+        # Check PNG header
+        if self.png_data[:8] != PNG_MAGIC:
+            raise ValueError('Input file is not a PNG image.')
+            
+        # Get image info from IHDR 
+        self.ihdr_start = self.png_data.index(b'IHDR')
+        self.width, self.height = struct.unpack('>II', self.png_data[self.ihdr_start+8:self.ihdr_start+16])
         
+    def embed_file(self, input_file, output_file): 
+        # Find and record IDAT chunk info 
+        idat_start = None
+        idat_end = None
+        idat_data = b''
+        for chunk in self.parse_chunks():
+            if chunk.type == b'IDAT':
+                if not idat_start:
+                    idat_start = chunk.start 
+                idat_end = chunk.end
+                idat_data += chunk.data
+        
+        # Build new IDAT with file data
+        file_data = open(input_file, 'rb').read()
+        file_chunk = b'IDAT' + struct.pack('>I', len(file_data))
+        file_chunk += file_data
+        file_chunk += struct.pack('>I', zlib.crc32(b'IDAT' + file_data))
+        
+        # Replace original IDAT, fix metadata
+        new_png_data = self.png_data[:idat_start] + file_chunk + self.png_data[idat_end:]
+        new_png_data = self.fix_metadata(new_png_data, idat_start, idat_end, len(file_chunk))
+        
+        # Save new PNG and check 
+        with open(output_file, 'wb') as f:
+            f.write(new_png_data) 
+        self.png_check(output_file)
+        
+        print(f'File {input_file} embedded into {output_file}')
+        
+    def parse_chunks(self):
+        chunks = []
+        while True:
+            # Get chunk info
+            chunk_start = self.png_data.index(b'\x00\x00\x00\x00')
+            chunk_len = int.from_bytes(self.png_data[chunk_start:chunk_start+4], 'big')
+            chunk_type = self.png_data[chunk_start+4:chunk_start+8]
+            chunk_end = chunk_start + chunk_len + 12
+            
+            chunks.append({
+                'start': chunk_start,
+                'end': chunk_end, 
+                'len': chunk_len,
+                'type': chunk_type, 
+                'data': self.png_data[chunk_start+8:chunk_end]
+            })
+            
+            if chunk_type == b'IEND':
+                break
+                
+            self.png_data = self.png_data[chunk_end:]
+            
+        return chunks  
+    
+    def fix_metadata(self, png_data, idat_start, idat_end, file_chunk_len):
+        # Fix CRC 
+        prev_chunk = None
+        for chunk in self.parse_chunks():   
+            if chunk['start'] < idat_start:
+                png_data = png_data[:chunk['end']] + png_data[idat_end:]
+                prev_chunk = chunk
+                continue         
+            if prev_chunk:
+                offset = chunk['start'] - prev_chunk['end'] 
+                chunk['start'] -= offset
+                chunk['end'] -= offset
+            crc = zlib.crc32(png_data[chunk['start']:chunk['end']])
+            png_data = png_data[:chunk['end']] + struct.pack('>I', crc) + png_data[chunk['end'] + 4:] 
+            prev_chunk = chunk
+            
+        # Fix lengths   
+        for i in range(0, png_data.index(b'IEND'), 12):
+            chunk_len = int.from_bytes(png_data[i:i+4], 'big')
+            png_data = png_data[:i] + struct.pack('>I', chunk_len + file_chunk_len) + png_data[i+4:]
+            
+        return png_data
+    
+    def png_check(self, png_file):
+        pngcheck_cmd = f'pngcheck {png_file}'
+        check_result = os.popen(pngcheck_cmd).read()
+        if 'OK' not in check_result:
+            raise ValueError(f'Output PNG check failed. Results: \n{check_result}')
+            
 if __name__ == '__main__':
-    if len(sys.argv) != 4:
-        print('Usage: {} <input file> <input png> <output png>')
-        sys.exit(1)
-        
     input_file = sys.argv[1]
     input_png = sys.argv[2]
     output_file = sys.argv[3]
     
-    embed_file(input_file, input_png, output_file)
-    print(f'File {input_file} embedded into {output_file}')
+    png = PNG(input_png)
+    png.embed_file(input_file, output_file)
