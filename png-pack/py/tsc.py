@@ -36,21 +36,18 @@ def embed_file(input_file, input_png, output_file):
             decompressed_data = zlib.decompress(idat_data)
         except zlib.error:
             # Not zlib data, try other method
-            pass  
-
-    # Get total data length
-    total_len = None 
-    if decompressed_data is None:
-        total_len = len(idat_data)
-    else:
-        total_len = len(decompressed_data + input_data)
+            pass   
 
     # Build new IDAT chunk 
-    new_idat = idat_header  
-    if decompressed_data is None:
-        new_idat += input_data
-    else: 
-        new_idat += decompressed_data + input_data
+    new_idat = idat_header          
+    new_idat += idat_data           # PNG image data
+
+    # Add file length 
+    input_len = len(input_data)
+    new_idat += struct.pack('>I', input_len)   # File length     
+
+    # Add file data
+    new_idat += input_data         # File data
 
     # Replace IDAT chunk 
     png_data = png_data[:start] + new_idat + png_data[start+12+idat_len:]
