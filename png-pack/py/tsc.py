@@ -43,12 +43,12 @@ def embed_file(input_file, input_png, output_file):
     new_idat += idat_data           # PNG image data 
 
     # Add file data as new IDAT chunk
-    file_chunk = b'IDAT' + struct.pack('>I', len(input_data)) 
-    file_chunk += input_data        # File data
+    file_chunk = b'IDAT' + struct.pack('>I', len(input_data))   # Add IDAT header 
+    file_chunk += input_data                                    # File data
 
     # Replace IDAT chunk 
     png_data = png_data[:start] + new_idat + png_data[start+12+idat_len:] 
-    png_data = png_data + file_chunk
+    png_data += file_chunk
 
     # Save as PNG
     with open(output_file, 'wb') as f:
