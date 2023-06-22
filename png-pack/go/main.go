@@ -1,137 +1,171 @@
-package main
+package pngtool
 
 import (
-	"bytes"
-	"encoding/binary"
-	"fmt"
-	"hash/crc32"
-	"io"
-	"os"
-	"strings"
+    "bytes"
+    "encoding/binary"
+    "errors"
+    "hash/crc32"
+    "io"
+    "os"
 )
 
-const PNG_MAGIC = "\x89PNG\r\n\x1a\n"
-var (
-	IHDR = []byte("IHDR")
-	PLTE = []byte("PLTE")
-)
+const PNG_SIGNATURE = "\x89\x50\x4E\x47\x0D\x0A\x1A\x0A" 
 
-func fixupZip(data []byte, startOffset int64) {
-	endCentralDirOffset := bytes.LastIndex(data, []byte("PK\x05\x06"))
-
-	commentLength := len(data) - endCentralDirOffset - 22 + 0x10
-	binary.LittleEndian.PutUint16(data[endCentralDirOffset+20:endCentralDirOffset+22], uint16(commentLength))
-
-	cdentCount := binary.LittleEndian.Uint16(data[endCentralDirOffset+10 : endCentralDirOffset+12])
-
-	centralDirStartOffset := binary.LittleEndian.Uint32(data[endCentralDirOffset+16 : endCentralDirOffset+20])
-	binary.LittleEndian.PutUint32(data[endCentralDirOffset+16:endCentralDirOffset+20], uint32(int(centralDirStartOffset)+int(startOffset)))
-
-	for i := 0; i < int(cdentCount); i++ {
-		centralDirStartOffset = uint32(bytes.Index(data[centralDirStartOffset:], []byte("PK\x01\x02"))) + centralDirStartOffset
-
-		off := binary.LittleEndian.Uint32(data[centralDirStartOffset+42 : centralDirStartOffset+46])
-		binary.LittleEndian.PutUint32(data[centralDirStartOffset+42:centralDirStartOffset+46], uint32(int(off)+int(startOffset)))
-
-		centralDirStartOffset++
-	}
+type Chunk struct {
+    Length uint32
+    Type   [4]byte
+    Data   []byte
+    CRC    uint32
 }
 
-func main() {
-	if len(os.Args) != 4 {
-		fmt.Printf("USAGE: %s cover.png content.bin output.png\n", os.Args[0])
-		os.Exit(1)
-	}
+func (c *Chunk) Write(w io.Writer) error {
+    if err := binary.Write(w, binary.BigEndian, c.Length); err != nil {
+        return err
+    }
+    if _, err := w.Write(c.Type[:]); err != nil {
+        return err
+    }
+    if _, err := w.Write(c.Data); err != nil {
+        return err
+    }
+    return binary.Write(w, binary.BigEndian, c.CRC)
+}
 
-	pngIn, _ := os.Open(os.Args[1])
-	defer pngIn.Close()
+func ParseChunk(r io.Reader) (*Chunk, error) {
+    var length uint32
+    if err := binary.Read(r, binary.BigEndian, &length); err != nil {
+        return nil, err
+    }
 
-	contentIn, _ := os.Open(os.Args[2])
-	defer contentIn.Close()
+    typeArr := make([]byte, 4)
+    if _, err := io.ReadFull(r, typeArr); err != nil {
+        return nil, err
+    }
 
-	pngOut, _ := os.Create(os.Args[3])
-	defer pngOut.Close()
+    data := make([]byte, length)
+    if _, err := io.ReadFull(r, data); err != nil {
+        return nil, err
+    }
 
-	pngHeader := make([]byte, len(PNG_MAGIC))
-	pngIn.Read(pngHeader)
-	if string(pngHeader) != PNG_MAGIC {
-		panic("Invalid PNG file")
-	}
-	pngOut.Write(pngHeader)
+    var crc uint32
+    if err := binary.Read(r, binary.BigEndian, &crc); err != nil {
+        return nil, err
+    }
 
-	var idatBody []byte
-	var width, height int
+    return &Chunk{
+        Length: length,
+        Type:   [4]byte(typeArr),
+        Data:   data,
+        CRC:    crc,
+    }, nil
+}
 
-	for {
-		var chunkLen uint32
-		binary.Read(pngIn, binary.BigEndian, &chunkLen)
+type PNG struct {
+    Width      uint32
+    Height     uint32
+    IDATStart  int64
+    IDATEnd    int64
+    Data       []byte 
+	EmbedChunk *Chunk
+}
 
-		chunkType := make([]byte, 4)
-		pngIn.Read(chunkType)
+func NewPNG(r io.Reader) (*PNG, error) {
+    // Check PNG signature
+    signature := make([]byte, 8)
+    if _, err := io.ReadFull(r, signature); err != nil {
+        return nil, err
+    } else if !bytes.Equal(signature, []byte(PNG_SIGNATURE)) {
+        return nil, errors.New("invalid PNG signature")
+    }
 
-		chunkBody := make([]byte, chunkLen)
-		pngIn.Read(chunkBody)
+    png := new(PNG)
 
-		var chunkCsum uint32
-		binary.Read(pngIn, binary.BigEndian, &chunkCsum)
+    for {
+        chunk, err := ParseChunk(r)
+        if err != nil {
+            return nil, err
+        }
 
-		if !bytes.Equal(chunkType, IHDR) && !bytes.Equal(chunkType, PLTE) && !bytes.Equal(chunkType, []byte("IDAT")) && !bytes.Equal(chunkType, []byte("IEND")) {
-			fmt.Printf("Warning: dropping non-essential or unknown chunk: %s\n", string(chunkType))
-			continue
-		}
+        if bytes.Equal(chunk.Type[:], []byte("IHDR")) {
+            // Get image info
+            buf := bytes.NewBuffer(chunk.Data)
+            if err := binary.Read(buf, binary.BigEndian, &png.Width); err != nil {
+                return nil, err
+            }
+            if err := binary.Read(buf, binary.BigEndian, &png.Height); err != nil {
+                return nil, err
+            }
+        } else if bytes.Equal(chunk.Type[:], []byte("IDAT")) {
+            // Record first IDAT offset
+            if png.IDATStart == 0 {
+                png.IDATStart = int64(chunk.Length) + 12 // chunk len(4) + type(4) + crc(4)
+            }
+            png.IDATEnd = int64(chunk.Length) + png.IDATEnd + 12 
 
-		if bytes.Equal(chunkType, IHDR) {
-			width = int(binary.BigEndian.Uint32(chunkBody[0:4]))
-			height = int(binary.BigEndian.Uint32(chunkBody[4:8]))
-			fmt.Printf("Image size: %dx%dpx\n", width, height)
-		}
+            png.Data = append(png.Data, chunk.Data...)
+        } else if bytes.Equal(chunk.Type[:], []byte("IEND")) {
+            break
+        }
+    }
 
-		if bytes.Equal(chunkType, []byte("IDAT")) {
-			idatBody = append(idatBody, chunkBody...)
-			continue
-		}
+    return png, nil
+}
 
-		if bytes.Equal(chunkType, []byte("IEND")) {
-			startOffset, _ := pngOut.Seek(0, io.SeekCurrent)
-			startOffset += int64(8 + len(idatBody))
-			fmt.Printf("Embedded file starts at offset %x\n", startOffset)
+func (png *PNG) Embed(target io.Reader, output *os.File) error {
+    // Get target file data 
+    data, err := io.ReadAll(target)
+    if err != nil {
+        return err
+    }
+    
+    // Build new IDAT chunk with file data
+    embedChunk := &Chunk{
+        Type:   [4]byte{'I', 'D', 'A', 'T'},
+        Data:   data,
+        CRC:    crc32.ChecksumIEEE(append([]byte("IDAT"), data...)),
+    }
+    
+    // Save embed chunk info 
+    png.EmbedChunk = embedChunk
+    
+    var buf bytes.Buffer
+    
+    // Write PNG header
+    buf.WriteString(PNG_SIGNATURE)
+    
+    // Write PNG chunks before first IDAT 
+    for _, c := range png.Chunks {
+        if c.Type == "IDAT" {
+            break
+        }
+        if err := c.Write(&buf); err != nil {
+            return err
+        }
+    }
+    
+    // Write new IDAT chunk
+    if err := embedChunk.Write(&buf); err != nil {
+        return err
+    }
+    
+    // Write rest IDAT and IEND chunks 
+    for _, c := range png.Chunks {
+        if c.Type == "IDAT" || c.Type == "IEND" {
+            if err := c.Write(&buf); err != nil {
+                return err
+            }
+        }
+    }
+    
+    // Save new PNG data
+    pngData := buf.Bytes() 
+    if _, err := output.Write(pngData); err != nil {
+        return err
+    }
+    
+    return nil 
+}
 
-			content, _ := io.ReadAll(contentIn)
-			idatBody = append(idatBody, content...)
-
-			if len(idatBody) > width*height {
-				fmt.Println("ERROR: Input files too big for cover image resolution.")
-				os.Exit(1)
-			}
-
-			if strings.ToLower(strings.Split(os.Args[2], ".")[1]) == "zip" || strings.ToLower(strings.Split(os.Args[2], ".")[1]) == "jar" {
-				fmt.Println("Fixing up zip offsets...")
-				fixupZip(idatBody, startOffset)
-			}
-
-			// write the IDAT chunk
-			pngOut.Write([]byte{byte(len(idatBody) >> 24), byte(len(idatBody) >> 16), byte(len(idatBody) >> 8), byte(len(idatBody))})
-			pngOut.Write([]byte("IDAT"))
-			pngOut.Write(idatBody)
-			crc := crc32.ChecksumIEEE(append([]byte("IDAT"), idatBody...))
-			pngOut.Write([]byte{byte(crc >> 24), byte(crc >> 16), byte(crc >> 8), byte(crc)})
-
-			// if we reached here, we're writing the IHDR, PLTE or IEND chunk
-			pngOut.Write([]byte{byte(chunkLen >> 24), byte(chunkLen >> 16), byte(chunkLen >> 8), byte(chunkLen)})
-			pngOut.Write(chunkType)
-			pngOut.Write(chunkBody)
-			crc = crc32.ChecksumIEEE(append(chunkType, chunkBody...))
-			pngOut.Write([]byte{byte(crc >> 24), byte(crc >> 16), byte(crc >> 8), byte(crc)})
-
-			if string(chunkType) == "IEND" {
-				// we're done!
-				break
-			}
-
-			// close our file handles
-			pngIn.Close()
-			contentIn.Close()
-			pngOut.Close()
-		}
-	}
+func (png *PNG) UnEmbed(target *os.File) (*os.File, error) {
+    // ... 
 }
